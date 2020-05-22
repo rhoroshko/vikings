@@ -7,7 +7,20 @@ from bs4 import BeautifulSoup
 import urllib3
 import pandas as pd
 import gc
+import multiprocessing
+import numpy as np
+from retrying import retry
+from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+pd.options.display.max_columns = None
+pd.options.display.max_rows = None
+pd.options.display.expand_frame_repr = False
+pd.options.mode.chained_assignment = None
+
+
+def retry_if_connection_error(exception):
+    print(f"Retrying after error: {exception}")
+    return isinstance(exception, requests.exceptions.ConnectionError)
 
 
 class VikingsDB:
@@ -33,12 +46,22 @@ class VikingsDB:
             }
         }
 
+    @staticmethod
+    def on_error(e):
+        if type(e) is Exception:
+            pool.terminate()
+
     @property
     def get_config(self):
         config_file = os.path.join(os.path.dirname(__file__), "config.json")
         with open(config_file, "r") as config:
             config_data = config.read()
         return json.loads(config_data)
+
+    @retry(retry_on_exception=retry_if_connection_error)
+    def get_soup(self, url):
+        page = requests.get(url, verify=False)
+        return BeautifulSoup(page.content, "lxml")
 
     def drop_table(self, table_name):
         sqlite_connection = sqlite3.connect(self.DB_FILE)
@@ -263,6 +286,7 @@ class VikingsDB:
         column_names.remove(f"{dimension_name}_id")
 
         df = data[column_names]
+        df.drop_duplicates(inplace=True)
 
         df.to_sql(name=dimension_name, con=sqlite_connection, if_exists='append', index=False)
 
@@ -305,10 +329,10 @@ class VikingsDB:
         drop_details = {}
         for language in self.LANG:
             url = urljoin(self.MASTER_URL, f"{language}/{drop_href}")
-            page = requests.get(url, verify=False)
-            soup = BeautifulSoup(page.content, "html.parser")
+            soup = self.get_soup(url)
 
             drop_name = soup.find("h1").text
+            print(" " * 3, language, drop_name)
 
             drop_details.update({f"drop_name_{language}": drop_name})
 
@@ -324,18 +348,17 @@ class VikingsDB:
         monster_details = {}
         for language in self.LANG:
             url = urljoin(self.MASTER_URL, f"{language}/{monster_href}")
-            page = requests.get(url, verify=False)
-            soup = BeautifulSoup(page.content, "html.parser")
+            soup = self.get_soup(url)
 
             monster_name = soup.find("h1").text
+            print(" " * 3, language, monster_name)
 
             monster_details.update({f"monster_name_{language}": monster_name})
 
         monster_details["monster_href"] = monster_href
 
         url = urljoin(self.MASTER_URL, monster_href)
-        page = requests.get(url, verify=False)
-        soup = BeautifulSoup(page.content, "html.parser")
+        soup = self.get_soup(url)
 
         table_general_info = soup.find("table", class_="gemMainDetail lines")
 
@@ -363,10 +386,10 @@ class VikingsDB:
         equipment_details = {}
         for language in self.LANG:
             url = urljoin(self.MASTER_URL, f"{language}/{equipment_href}")
-            page = requests.get(url, verify=False)
-            soup = BeautifulSoup(page.content, "html.parser")
+            soup = self.get_soup(url)
 
             equipment_name = soup.find("h1").text
+            print(" " * 3, language, equipment_name)
 
             general_info = pd.read_html(str(soup.find("table", class_="gemMainDetail lines")))[0]
 
@@ -384,8 +407,7 @@ class VikingsDB:
         equipment_details["equipment_href"] = equipment_href
 
         url = urljoin(self.MASTER_URL, equipment_href)
-        page = requests.get(url, verify=False)
-        soup = BeautifulSoup(page.content, "html.parser")
+        soup = self.get_soup(url)
 
         materials_table = soup.find("table", class_="gemMainDetail gemList")
         if materials_table:
@@ -395,6 +417,8 @@ class VikingsDB:
                 materials.append(a.get("href"))
 
             equipment_details["material_subequipment_href"] = materials
+        else:
+            equipment_details["material_subequipment_href"] = [None]
 
         return equipment_details
 
@@ -408,71 +432,140 @@ class VikingsDB:
         ]
 
     def update_drop(self, drop_type):
+        function_start_time = datetime.now()
+        print(f">>> Update {drop_type} start time:   {str(function_start_time)}")
+
         if drop_type not in self.DROP_TYPES:
             raise ValueError(f"results: drop_type must be one of {self.DROP_TYPES.keys()}")
 
+        print(f"Collect {drop_type}s list")
         url = self.DROP_TYPES[drop_type]["url"]
-        page = requests.get(url, verify=False)
-        soup = BeautifulSoup(page.content, "html.parser")
+        soup = self.get_soup(url)
 
+        list_drop_href = []
         for div in soup.find_all("div", class_="name"):
-            drop_href = div.find_parent("a").get("href")
-            print(div.text)
-            print("    get details")
-            drop_details = self.get_drop_details(drop_href, drop_type)
+            list_drop_href.append(div.find_parent("a").get("href"))
 
-            print("    update dimension")
-            df_drop_details = pd.DataFrame([drop_details])
-            self.update_dimension("drop", df_drop_details)
+        global pool
+        pool = multiprocessing.Pool(20)
+        print(f"Collect {drop_type}s details list")
+        list_pool_drop_details = [
+            pool.apply_async(self.get_drop_details, (drop_href, drop_type,), error_callback=self.on_error)
+            for drop_href in list_drop_href]
+        pool.close()
+        pool.join()
+
+        print("Parse results into dataframe")
+        list_drop_details = [drop_details.get() for drop_details in list_pool_drop_details]
+
+        df_drop_details = pd.DataFrame(list_drop_details)
+
+        print("Update drop dimension")
+        self.update_dimension("drop", df_drop_details)
+
+        print(f"{drop_type.title()}s data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update {drop_type} end time:     {str(function_end_time)}")
+        print(f">>> Update {drop_type} duration:     {str(function_duration)}")
+        print("-" * 100)
+
         gc.collect()
 
     def update_monster(self):
+        function_start_time = datetime.now()
+        print(f">>> Update monster start time:   {str(function_start_time)}")
+
+        print("Collect monsters list")
         url = self.MONSTER_URL
-        page = requests.get(url, verify=False)
-        soup = BeautifulSoup(page.content, "html.parser")
+        soup = self.get_soup(url)
 
+        list_monster_href = []
         for div in soup.find_all("div", class_="name"):
-            monster_href = div.find_parent("a").get("href")
-            print(div.text)
-            print("    get details")
-            monster_details = self.get_monster_details(monster_href)
+            list_monster_href.append(div.find_parent("a").get("href"))
 
-            print("    update dimension")
-            df_monster_details = pd.DataFrame([monster_details])
-            self.update_dimension("monster", df_monster_details)
+        global pool
+        pool = multiprocessing.Pool(4)
+        print("Collect monsters details list")
+        list_pool_monster_details = [
+            pool.apply_async(self.get_monster_details, (monster_href,), error_callback=self.on_error)
+            for monster_href in list_monster_href]
+        pool.close()
+        pool.join()
 
-            print("    update bridge")
-            df_monster_drop = pd.DataFrame(monster_details)
-            self.update_bridge("monster_drop", df_monster_drop)
+        print("Parse results into dataframe")
+        list_monster_details = [monster_details.get() for monster_details in list_pool_monster_details]
+
+        df = pd.DataFrame(list_monster_details)
+
+        lst_col = "drop_href"
+        df_monster_details = pd.DataFrame({
+            col: np.repeat(df[col].values, df[lst_col].str.len())
+            for col in df.columns.drop(lst_col)}
+        ).assign(**{lst_col: np.concatenate(df[lst_col].values)})[df.columns]
+
+        print("Update monster dimension")
+        self.update_dimension("monster", df_monster_details)
+
+        print("Update monster_drop bridge")
+        self.update_bridge("monster_drop", df_monster_details)
+
+        print("Monsters data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update monster end time:     {str(function_end_time)}")
+        print(f">>> Update monster duration:     {str(function_duration)}")
+        print("-" * 100)
+
         gc.collect()
 
     def update_equipment(self):
+        function_start_time = datetime.now()
+        print(f">>> Update equipment start time:   {str(function_start_time)}")
+
+        print("Collect equipments list")
         url = self.EQUIPMENT_URL
-        page = requests.get(url, verify=False)
-        soup = BeautifulSoup(page.content, "html.parser")
+        soup = self.get_soup(url)
 
-        equipment_details_list = []
+        list_equipment_href = []
         for div in soup.find_all("div", class_="name"):
-            equipment_href = div.find_parent("a").get("href")
-            print(div.text)
-            print("    get details")
-            equipment_details = self.get_equipment_details(equipment_href)
-            equipment_details_list.append(equipment_details)
+            list_equipment_href.append(div.find_parent("a").get("href"))
 
-            print("    update dimension")
-            df_equipment_details = pd.DataFrame([equipment_details])
-            self.update_dimension("equipment", df_equipment_details)
+        global pool
+        pool = multiprocessing.Pool(4)
+        print("Collect equipments details list")
+        list_pool_equipment_details = [
+            pool.apply_async(self.get_equipment_details, (equipment_href,), error_callback=self.on_error)
+            for equipment_href in list_equipment_href]
+        pool.close()
+        pool.join()
 
-        print("    update bridge")
-        equipments_count = len(equipment_details_list)
-        for equipments_number, equipment_details in enumerate(equipment_details_list):
-            print(f"        {equipments_number + 1} of {equipments_count}")
-            equipment_materials = "material_subequipment_href"
-            if equipment_materials in equipment_details:
-                df_equipment_material = pd.DataFrame(equipment_details)
-                self.update_bridge("equipment_material_subequipment", df_equipment_material, equipment_materials)
+        print("Parse results into dataframe")
+        list_equipment_details = [equipment_details.get() for equipment_details in list_pool_equipment_details]
 
-        gc.collect()
+        df = pd.DataFrame(list_equipment_details)
+
+        lst_col = "material_subequipment_href"
+        df_equipment_details = pd.DataFrame({
+            col: np.repeat(df[col].values, df[lst_col].str.len())
+            for col in df.columns.drop(lst_col)}
+        ).assign(**{lst_col: np.concatenate(df[lst_col].values)})[df.columns]
+
+        print("Update equipment dimension")
+        self.update_dimension("equipment", df_equipment_details)
+
+        print("Update equipment_drop bridge")
+        self.update_bridge("equipment_material_subequipment", df_equipment_details, "material_subequipment_href")
+
+        print("Equipments data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update equipment end time:     {str(function_end_time)}")
+        print(f">>> Update equipment duration:     {str(function_duration)}")
+        print("-" * 100)
 
     def update_equipment_materials(self, equipment_id, parent_equipment_id=None,
                                    equipment_0_id=None,
@@ -560,6 +653,8 @@ class VikingsDB:
                     equipment_8_id = "NULL"
                 if not equipment_9_id:
                     equipment_9_id = "NULL"
+                if not material_id:
+                    material_id = "NULL"
 
                 sqlite_connection_2 = sqlite3.connect(self.DB_FILE)
                 cursor_2 = sqlite_connection_2.cursor()
@@ -622,6 +717,10 @@ class VikingsDB:
                 sqlite_connection_2.close()
 
     def update_equipment_materials_all(self):
+        function_start_time = datetime.now()
+        print(f">>> Update all equipment materials start time:   {str(function_start_time)}")
+
+        print("Update all equipment materials")
         sqlite_connection = sqlite3.connect(self.DB_FILE)
         cursor = sqlite_connection.cursor()
 
@@ -639,10 +738,16 @@ class VikingsDB:
         sqlite_connection.close()
 
         for equipment in equipment_ids:
-            equipment_name = equipment[0]
-            print(equipment_name)
+            equipment_id = equipment[0]
 
-            self.update_equipment_materials(equipment_name)
+            self.update_equipment_materials(equipment_id)
+        print("All equipment materials updated")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update all equipment materials end time:     {str(function_end_time)}")
+        print(f">>> Update all equipment materials duration:     {str(function_duration)}")
+        print("-" * 100)
 
     def create_db(self):
         config = self.get_config
@@ -654,20 +759,21 @@ class VikingsDB:
         print("-" * 100)
 
     def update_db(self):
+        function_start_time = datetime.now()
+        print(f">>> Update DB start time:   {str(function_start_time)}")
+
         self.update_boost()
-        print("-" * 100)
         self.update_drop("material")
-        print("-" * 100)
         self.update_drop("stone")
-        print("-" * 100)
         self.update_drop("rune")
-        print("-" * 100)
         self.update_monster()
-        print("-" * 100)
         self.update_equipment()
-        print("-" * 100)
         self.update_equipment_materials_all()
-        print("-" * 100)
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update DB end time:     {str(function_end_time)}")
+        print(f">>> Update DB duration:     {str(function_duration)}")
 
     def init_db(self):
         self.create_db()
@@ -687,14 +793,11 @@ class VikingsDB:
 
 
 if __name__ == "__main__":
+    start = datetime.now()
+
     # VikingsDB().init_db()
-    # VikingsDB().update_equipment_materials(448)
-    # VikingsDB().update_equipment_materials(3)
+    VikingsDB().update_db()
 
-    # config = VikingsDB().get_config
-    # VikingsDB().create_view_all(config)
-
-    VikingsDB().update_equipment_materials_all()
-    # VikingsDB().update_equipment_materials(291)
-
-    # VikingsDB().update_equipment()
+    end = datetime.now()
+    duration = end - start
+    print(">>>>>>>>>>>>> Duration: ", str(duration))
