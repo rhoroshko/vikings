@@ -10,6 +10,16 @@
       "monster_drop",
       "equipment_material_subequipment"
     ],
+    "fact": [
+      {
+        "name": "drop_boosts",
+        "levels": 6
+      },
+      {
+        "name": "equipment_boosts",
+        "levels": 6
+      }
+    ],
     "custom": [
       {
         "name": "equipment_materials",

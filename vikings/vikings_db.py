@@ -23,6 +23,23 @@ def retry_if_connection_error(exception):
     return isinstance(exception, requests.exceptions.ConnectionError)
 
 
+def create_row_for_each_dataframe_list_element(df, list_column):
+    return pd.DataFrame({
+        col: np.repeat(df[col].values, df[list_column].str.len())
+        for col in df.columns.drop(list_column)}
+    ).assign(**{list_column: np.concatenate(df[list_column].values)})[df.columns]
+
+
+def create_column_for_each_dataframe_dictionary_element(df, dictionary_column):
+    return pd.concat(
+        [
+            df.drop([dictionary_column], axis=1),
+            df[dictionary_column].apply(pd.Series)
+        ],
+        axis=1
+    )
+
+
 class VikingsDB:
     def __init__(self):
         self.DB_FILE = os.path.join(os.path.dirname(__file__), "vikings.db")
@@ -34,6 +51,8 @@ class VikingsDB:
         self.RUNE_URL = urljoin(self.MASTER_URL, "resources/runes/")
         self.MONSTER_URL = urljoin(self.MASTER_URL, "resources/monsters/")
         self.EQUIPMENT_URL = urljoin(self.MASTER_URL, "resources/equipment/")
+        self.CITY_SKINS = urljoin(self.MASTER_URL, "/resources/city_skins/")
+        self.ACHIEVEMENTS = urljoin(self.MASTER_URL, "/resources/achievements/")
         self.DROP_TYPES = {
             "material": {
                 "url": self.MATERIAL_URL
@@ -62,6 +81,9 @@ class VikingsDB:
     def get_soup(self, url):
         page = requests.get(url, verify=False)
         return BeautifulSoup(page.content, "lxml")
+
+    def get_lang_url(self, url, language):
+        return url.replace(self.MASTER_URL, urljoin(self.MASTER_URL, f"{language}/"))
 
     def drop_table(self, table_name):
         sqlite_connection = sqlite3.connect(self.DB_FILE)
@@ -140,7 +162,7 @@ class VikingsDB:
         create_table = f"""
         CREATE TABLE [{table_name}]("""
 
-        for _, column in enumerate(table_name.split("_")):
+        for column in table_name.split("_"):
             create_table += f"""
             [{column}_id] INTEGER,"""
 
@@ -152,6 +174,33 @@ class VikingsDB:
         self.drop_table(table_name)
         print(create_table)
         cursor.execute(create_table)
+
+        cursor.close()
+        sqlite_connection.close()
+
+    def create_fact_table(self, table_name, number_of_levels):
+        sqlite_connection = sqlite3.connect(self.DB_FILE)
+        cursor = sqlite_connection.cursor()
+
+        create_table = f"""
+        CREATE TABLE [{table_name}]("""
+
+        for column in table_name[:-1].split("_"):
+            create_table += f"""
+            [{column}_id] INTEGER,"""
+
+        for level_number in range(1, number_of_levels + 1):
+            create_table += f"""
+            [level_{level_number}] TEXT,"""
+
+        create_table = create_table[:-1]
+
+        create_table += """
+        )"""
+
+        # self.drop_table(table_name)
+        print(create_table)
+        # cursor.execute(create_table)
 
         cursor.close()
         sqlite_connection.close()
@@ -248,6 +297,12 @@ class VikingsDB:
         for table_name in config["tables"]["bridge"]:
             self.create_bridge_table(table_name)
 
+    def create_fact_table_all(self, config):
+        for table in config["tables"]["fact"]:
+            table_name = table["name"]
+            number_of_levels = table["levels"]
+            self.create_fact_table(table_name, number_of_levels)
+
     def create_custom_table_all(self, config):
         for table in config["tables"].get("custom"):
             table_name = table["name"]
@@ -325,6 +380,54 @@ class VikingsDB:
         cursor.close()
         sqlite_connection.close()
 
+    def update_fact(self, fact_name, data):
+        sqlite_connection = sqlite3.connect(self.DB_FILE)
+        cursor = sqlite_connection.cursor()
+
+        table_column_names = 'PRAGMA table_info([' + fact_name + ']);'
+        cursor.execute(table_column_names)
+        table_column_names = cursor.fetchall()
+        cursor.close()
+
+        column_names = []
+
+        for name in table_column_names:
+            column_names.append(name[1])
+
+        for dimension in fact_name[:-1].split("_"):
+            query = f"SELECT [{dimension}_id], [{dimension}_href] FROM [{dimension}]"
+            df_0 = pd.read_sql_query(query, sqlite_connection)
+
+            left_on = f"{dimension}_href"
+            right_on = f"{dimension}_href"
+
+            data = pd.merge(data, df_0, how="left", left_on=left_on, right_on=right_on)
+
+        df = data[column_names]
+
+        df.to_sql(name=fact_name, con=sqlite_connection, if_exists='append', index=False)
+
+        sqlite_connection.close()
+
+    def get_boost_details(self, boost_href):
+        boost_details = {}
+        for language in self.LANG:
+            url = self.get_lang_url(boost_href, language)
+            soup = self.get_soup(url)
+
+            list_boost = soup.find("select", class_="boostsList").find_all("option")
+            for boost in list_boost:
+                boost_id = int(boost.get("value"))
+                boost_name = boost.text
+                print(" " * 3, language, boost_name)
+
+                if boost_details.get(boost_id):
+                    boost_details[boost_id].update({f"boost_name_{language}": boost.text})
+                else:
+                    boost_details.update({boost_id: {f"boost_name_{language}": boost_name}})
+
+        return boost_details
+
     def get_drop_details(self, drop_href, drop_type):
         drop_details = {}
         for language in self.LANG:
@@ -341,6 +444,24 @@ class VikingsDB:
         drop_details["is_stone"] = 0
         drop_details["is_rune"] = 0
         drop_details.update({f"is_{drop_type}": 1})
+
+        if drop_type != "material":
+            url = urljoin(self.MASTER_URL, drop_href)
+            soup = self.get_soup(url)
+
+            list_boosts = []
+            for a in soup.find_all("div", class_="table-responsive gemDetailDiv")[1].find_all("a"):
+                if a.has_attr("href"):
+                    boost_href = str(int(a.get("href").split("/")[-2]))
+                    boost_info = {"boost_href": boost_href}
+
+                    for div in a.parent.find_next_siblings():
+                        level_key = f"level_{div.get('val')}"
+                        level_value = div.text
+                        boost_info.update({level_key: level_value})
+                    list_boosts.append(boost_info)
+
+            drop_details["drop_boosts"] = list_boosts
 
         return drop_details
 
@@ -404,6 +525,18 @@ class VikingsDB:
             equipment_details.update({f"slot_{language}": slot})
             equipment_details.update({f"equipment_type_{language}": equipment_types})
 
+            table_equipment_statistic = soup.find("div", class_="table-responsive eqInfoDiv").find("table")
+            df_equipment_statistic = pd.read_html(str(table_equipment_statistic))[0]
+
+            df_equipment_statistic.columns = ["boost", "level_1", "level_2", "level_3", "level_4", "level_5", "level_6"]
+
+            list_equipment_statistic = df_equipment_statistic.to_dict("records")
+
+            if equipment_details.get("equipment_boosts"):
+                equipment_details["equipment_boosts"].update({language: list_equipment_statistic})
+            else:
+                equipment_details.update({"equipment_boosts": {language: list_equipment_statistic}})
+
         equipment_details["equipment_href"] = equipment_href
 
         url = urljoin(self.MASTER_URL, equipment_href)
@@ -423,13 +556,36 @@ class VikingsDB:
         return equipment_details
 
     def update_boost(self):
-        urls = [
-            "",
-            "",
-            "",
-            "",
-            "",
+        function_start_time = datetime.now()
+        print(f">>> Update boost start time:   {str(function_start_time)}")
+
+        print(f"Collect boosts urls list")
+        list_url = [
+            self.EQUIPMENT_URL,
+            self.STONE_URL,
+            self.RUNE_URL,
+            self.CITY_SKINS,
+            self.ACHIEVEMENTS
         ]
+        boost_details = {}
+        for url in list_url:
+            print(f"Collect boosts details dictionary from {url}")
+            boost_details.update(self.get_boost_details(url))
+
+        df = pd.DataFrame.from_dict(boost_details, orient="index")
+        df["boost_href"] = df.index
+        df_boost_details = df.sort_index()
+
+        print("Update boost dimension")
+        self.update_dimension("boost", df_boost_details)
+
+        print(f"Boost data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update boost end time:     {str(function_end_time)}")
+        print(f">>> Update boost duration:     {str(function_duration)}")
+        print("-" * 100)
 
     def update_drop(self, drop_type):
         function_start_time = datetime.now()
@@ -462,6 +618,15 @@ class VikingsDB:
 
         print("Update drop dimension")
         self.update_dimension("drop", df_drop_details)
+
+        if "drop_boosts" in df_drop_details.columns:
+            print("Update drop boost")
+            df_drop_boosts_raw = df_drop_details[["drop_href", "drop_boosts"]]
+
+            df_drop_boosts_01 = create_row_for_each_dataframe_list_element(df_drop_boosts_raw, "drop_boosts")
+            df_drop_boosts = create_column_for_each_dataframe_dictionary_element(df_drop_boosts_01, "drop_boosts")
+
+            self.update_fact("drop_boosts", df_drop_boosts)
 
         print(f"{drop_type.title()}s data refreshed")
 
@@ -499,11 +664,7 @@ class VikingsDB:
 
         df = pd.DataFrame(list_monster_details)
 
-        lst_col = "drop_href"
-        df_monster_details = pd.DataFrame({
-            col: np.repeat(df[col].values, df[lst_col].str.len())
-            for col in df.columns.drop(lst_col)}
-        ).assign(**{lst_col: np.concatenate(df[lst_col].values)})[df.columns]
+        df_monster_details = create_row_for_each_dataframe_list_element(df, "drop_href")
 
         print("Update monster dimension")
         self.update_dimension("monster", df_monster_details)
@@ -547,17 +708,62 @@ class VikingsDB:
 
         df = pd.DataFrame(list_equipment_details)
 
-        lst_col = "material_subequipment_href"
-        df_equipment_details = pd.DataFrame({
-            col: np.repeat(df[col].values, df[lst_col].str.len())
-            for col in df.columns.drop(lst_col)}
-        ).assign(**{lst_col: np.concatenate(df[lst_col].values)})[df.columns]
+        df_equipment_details = create_row_for_each_dataframe_list_element(df, "material_subequipment_href")
 
         print("Update equipment dimension")
         self.update_dimension("equipment", df_equipment_details)
 
         print("Update equipment_drop bridge")
         self.update_bridge("equipment_material_subequipment", df_equipment_details, "material_subequipment_href")
+
+        print("Update equipment boost")
+        df_equipment_boosts_data = df[["equipment_href", "equipment_boosts"]]
+
+        df_data_split_by_language = create_column_for_each_dataframe_dictionary_element(
+                                        df_equipment_boosts_data,
+                                        "equipment_boosts"
+                                    )
+
+        data_first_language = pd.DataFrame()
+        for language in self.LANG:
+            df_language_data = df_data_split_by_language[["equipment_href", language]]
+
+            df_language_data_split_by_fact_line = create_row_for_each_dataframe_list_element(
+                                                    df_language_data,
+                                                    language
+                                                )
+
+            df_language_boost = create_column_for_each_dataframe_dictionary_element(
+                                df_language_data_split_by_fact_line,
+                                language
+                            )
+
+            query = f"SELECT [boost_href], [boost_name_{language}] FROM [boost]"
+            df_0 = pd.read_sql_query(query, sqlite3.connect(self.DB_FILE))
+
+            data = pd.merge(df_language_boost, df_0, how="left", left_on="boost", right_on=f"boost_name_{language}")
+            data.drop(columns=["boost", f"boost_name_{language}"], inplace=True)
+
+            if len(data_first_language) == 0:
+                data_first_language = data_first_language.append(data)
+            else:
+                if not data.equals(data_first_language):
+                    df_first_except_current = data_first_language[~(data_first_language.isin(data).all(axis=1))]
+                    df_current_except_first = data[~(data.isin(data_first_language).all(axis=1))]
+                    error_message = f"Boost data for {language} language does not match with {self.LANG[0]} language."
+                    error_message += "\n"
+                    error_message += f"Boost data for {self.LANG[0]} language:"
+                    error_message += "\n"
+                    error_message += f"{df_first_except_current}"
+                    error_message += "\n"
+                    error_message += "*" * 100
+                    error_message += "\n"
+                    error_message += f"Boost data for {language} language:"
+                    error_message += "\n"
+                    error_message += f"{df_current_except_first}"
+                    raise ValueError(error_message)
+
+        self.update_fact("equipment_boosts", data_first_language)
 
         print("Equipments data refreshed")
 
@@ -754,6 +960,7 @@ class VikingsDB:
 
         self.create_dimension_table_all(config)
         self.create_bridge_table_all(config)
+        self.create_fact_table_all(config)
         self.create_custom_table_all(config)
         self.create_view_all(config)
         print("-" * 100)
@@ -795,7 +1002,7 @@ class VikingsDB:
 if __name__ == "__main__":
     start = datetime.now()
 
-    # VikingsDB().init_db()
+    VikingsDB().init_db()
     VikingsDB().update_db()
 
     end = datetime.now()
