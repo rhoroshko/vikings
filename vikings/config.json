@@ -4,7 +4,9 @@
       "drop",
       "monster",
       "equipment",
-      "boost"
+      "boost",
+      "equipment_slot",
+      "equipment_type"
     ],
     "bridge": [
       "monster_drop",
@@ -87,7 +89,7 @@
     {
      "subequipment": {
       "source_table": "equipment",
-      "columns": ["%_id", "%_href"]
+      "columns": ["equipment_id", "equipment_href"]
      }
     }
   ],
@@ -95,15 +97,15 @@
     "drop": [
       {"is_material": "INTEGER"},
       {"is_stone": "INTEGER"},
-      {"is_rune":  "INTEGER"}
+      {"is_rune": "INTEGER"}
     ],
     "monster": [
       {"is_uber": "INTEGER"},
-      {"is_shaman":  "INTEGER"}
+      {"is_shaman": "INTEGER"}
     ],
     "equipment": [
-      {"slot": "TEXT"},
-      {"equipment_type": "TEXT"}
+      {"equipment_slot_id": "INTEGER"},
+      {"equipment_type_id": "INTEGER"}
     ]
   }
 }

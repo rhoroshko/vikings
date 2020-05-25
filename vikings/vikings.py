@@ -32,6 +32,10 @@ class Vikings:
             ,ui.uber_invader_name_{self.language}   as uber_invader
         FROM
             equipment_materials em
+            LEFT JOIN equipment_boosts eb
+                ON eb.equipment_id = em.equipment_0_id
+            LEFT JOIN boost b
+                ON b.boost_id = eb.boost_id
             LEFT JOIN equipment e0
                 ON e0.equipment_id = em.equipment_0_id
             LEFT JOIN equipment e1
@@ -59,7 +63,9 @@ class Vikings:
             LEFT JOIN uber_invader ui
                 ON ui.uber_invader_id = em.uber_invader_id
         WHERE
-            e0.equipment_name_{self.language} = '{set_name.replace("'", "''")}'
+            b.boost_name_{self.language} = '{set_name.replace("'", "''")}'
+        ORDER BY
+            CAST(REPLACE(eb.level_6, '%', '') AS DECIMAL) desc
         """
         df = vdb.run_select(query)
 

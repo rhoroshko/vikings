@@ -198,9 +198,9 @@ class VikingsDB:
         create_table += """
         )"""
 
-        # self.drop_table(table_name)
+        self.drop_table(table_name)
         print(create_table)
-        # cursor.execute(create_table)
+        cursor.execute(create_table)
 
         cursor.close()
         sqlite_connection.close()
@@ -503,6 +503,48 @@ class VikingsDB:
 
         return monster_details
 
+    def get_equipment_slot_details(self):
+        equipment_slot_details = {}
+        for language in self.LANG:
+            url = self.get_lang_url(self.EQUIPMENT_URL, language)
+            soup = self.get_soup(url)
+
+            list_equipment_slot = soup.find("select", class_="slotList").find_all("option")
+            for equipment_slot in list_equipment_slot:
+                equipment_slot_id = int(equipment_slot.get("value"))
+                equipment_slot_name = equipment_slot.text
+                print(" " * 3, language, equipment_slot_name)
+
+                if equipment_slot_details.get(equipment_slot_id):
+                    equipment_slot_details[equipment_slot_id].update(
+                        {f"equipment_slot_name_{language}": equipment_slot.text})
+                else:
+                    equipment_slot_details.update(
+                        {equipment_slot_id: {f"equipment_slot_name_{language}": equipment_slot_name}})
+
+        return equipment_slot_details
+
+    def get_equipment_type_details(self):
+        equipment_type_details = {}
+        for language in self.LANG:
+            url = self.get_lang_url(self.EQUIPMENT_URL, language)
+            soup = self.get_soup(url)
+
+            list_equipment_type = soup.find("select", class_="typeList").find_all("option")
+            for equipment_type in list_equipment_type:
+                equipment_type_id = int(equipment_type.get("value"))
+                equipment_type_name = equipment_type.text
+                print(" " * 3, language, equipment_type_name)
+
+                if equipment_type_details.get(equipment_type_id):
+                    equipment_type_details[equipment_type_id].update(
+                        {f"equipment_type_name_{language}": equipment_type.text})
+                else:
+                    equipment_type_details.update(
+                        {equipment_type_id: {f"equipment_type_name_{language}": equipment_type_name}})
+
+        return equipment_type_details
+
     def get_equipment_details(self, equipment_href):
         equipment_details = {}
         for language in self.LANG:
@@ -516,14 +558,14 @@ class VikingsDB:
 
             if len(general_info) > 5:
                 slot = general_info.iloc[4, 1]
-                equipment_types = general_info.iloc[5, 1]
+                equipment_type = general_info.iloc[5, 1]
             else:
                 slot = general_info.iloc[1, 1]
-                equipment_types = general_info.iloc[2, 1]
+                equipment_type = general_info.iloc[2, 1]
 
             equipment_details.update({f"equipment_name_{language}": equipment_name})
             equipment_details.update({f"slot_{language}": slot})
-            equipment_details.update({f"equipment_type_{language}": equipment_types})
+            equipment_details.update({f"equipment_type_{language}": equipment_type})
 
             table_equipment_statistic = soup.find("div", class_="table-responsive eqInfoDiv").find("table")
             df_equipment_statistic = pd.read_html(str(table_equipment_statistic))[0]
@@ -682,6 +724,50 @@ class VikingsDB:
 
         gc.collect()
 
+    def update_equipment_slot(self):
+        function_start_time = datetime.now()
+        print(f">>> Update equipment slot start time:   {str(function_start_time)}")
+
+        print(f"Collect equipment slot details dictionary")
+        equipment_slot_details = self.get_equipment_slot_details()
+
+        df = pd.DataFrame.from_dict(equipment_slot_details, orient="index")
+        df["equipment_slot_href"] = df.index
+        df_equipment_slot_details = df.sort_index()
+
+        print("Update equipment slot dimension")
+        self.update_dimension("equipment_slot", df_equipment_slot_details)
+
+        print(f"Equipment slot data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update equipment slot end time:     {str(function_end_time)}")
+        print(f">>> Update equipment slot duration:     {str(function_duration)}")
+        print("-" * 100)
+
+    def update_equipment_type(self):
+        function_start_time = datetime.now()
+        print(f">>> Update equipment type start time:   {str(function_start_time)}")
+
+        print(f"Collect equipment type details dictionary")
+        equipment_type_details = self.get_equipment_type_details()
+
+        df = pd.DataFrame.from_dict(equipment_type_details, orient="index")
+        df["equipment_type_href"] = df.index
+        df_equipment_type_details = df.sort_index()
+
+        print("Update equipment type dimension")
+        self.update_dimension("equipment_type", df_equipment_type_details)
+
+        print(f"Equipment type data refreshed")
+
+        function_end_time = datetime.now()
+        function_duration = function_end_time - function_start_time
+        print(f">>> Update equipment type end time:     {str(function_end_time)}")
+        print(f">>> Update equipment type duration:     {str(function_duration)}")
+        print("-" * 100)
+
     def update_equipment(self):
         function_start_time = datetime.now()
         print(f">>> Update equipment start time:   {str(function_start_time)}")
@@ -711,6 +797,30 @@ class VikingsDB:
         df_equipment_details = create_row_for_each_dataframe_list_element(df, "material_subequipment_href")
 
         print("Update equipment dimension")
+
+        df_equipment_slot = self.run_select("SELECT * FROM equipment_slot")
+        df_equipment_type = self.run_select("SELECT * FROM equipment_type")
+
+        left_on = f"slot_{self.LANG[0]}"
+        right_on = f"equipment_slot_name_{self.LANG[0]}"
+        df_equipment_details = pd.merge(
+            df_equipment_details,
+            df_equipment_slot,
+            how="left",
+            left_on=left_on,
+            right_on=right_on
+        )
+
+        left_on = f"equipment_type_{self.LANG[0]}"
+        right_on = f"equipment_type_name_{self.LANG[0]}"
+        df_equipment_details = pd.merge(
+            df_equipment_details,
+            df_equipment_type,
+            how="left",
+            left_on=left_on,
+            right_on=right_on
+        )
+
         self.update_dimension("equipment", df_equipment_details)
 
         print("Update equipment_drop bridge")
@@ -974,6 +1084,8 @@ class VikingsDB:
         self.update_drop("stone")
         self.update_drop("rune")
         self.update_monster()
+        self.update_equipment_slot()
+        self.update_equipment_type()
         self.update_equipment()
         self.update_equipment_materials_all()
 
@@ -1003,7 +1115,6 @@ if __name__ == "__main__":
     start = datetime.now()
 
     VikingsDB().init_db()
-    VikingsDB().update_db()
 
     end = datetime.now()
     duration = end - start
