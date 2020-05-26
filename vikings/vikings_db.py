@@ -288,6 +288,23 @@ class VikingsDB:
         cursor.close()
         sqlite_connection.close()
 
+    def create_report_view(self, view_name, view_code):
+        sqlite_connection = sqlite3.connect(self.DB_FILE)
+        cursor = sqlite_connection.cursor()
+
+        create_view = f"""CREATE VIEW [{view_name}]
+        AS
+        """
+
+        create_view += view_code
+
+        self.drop_view(view_name)
+        print(create_view)
+        cursor.execute(create_view)
+
+        cursor.close()
+        sqlite_connection.close()
+
     def create_dimension_table_all(self, config):
         for table_name in config["tables"]["dimension"]:
             extra_columns = config["extra_columns"].get(table_name)
@@ -324,6 +341,11 @@ class VikingsDB:
                 columns=columns,
                 data_filter=data_filter
             )
+
+        for view in config["report_views"]:
+            view_name = view
+            view_code = config["report_views"][view_name]
+            self.create_report_view(view_name, view_code)
 
     def update_dimension(self, dimension_name, data):
         sqlite_connection = sqlite3.connect(self.DB_FILE)
@@ -1099,7 +1121,7 @@ class VikingsDB:
         self.update_db()
 
     def run_select(self, select):
-        if not select.startswith("SELECT"):
+        if not select.startswith("SELECT") and not select.startswith("WITH"):
             print("WRONG SELECT!!!")
         else:
             sqlite_connection = sqlite3.connect(self.DB_FILE)

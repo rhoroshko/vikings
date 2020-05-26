@@ -107,5 +107,8 @@
       {"equipment_slot_id": "INTEGER"},
       {"equipment_type_id": "INTEGER"}
     ]
+  },
+  "report_views": {
+    "best_boost_equipment": "WITH cte AS\n(\nSELECT\n    eb.*\n    ,e.equipment_slot_id\n    ,e.equipment_type_id\n    ,RANK() OVER(\n                    PARTITION BY\n                         eb.boost_id\n                        ,e.equipment_slot_id\n                        ,e.equipment_type_id\n                    ORDER BY\n                        CAST(REPLACE(eb.level_6, '%', '') AS DECIMAL) DESC,\n                        CAST(REPLACE(eb.level_5, '%', '') AS DECIMAL) DESC,\n                        CAST(REPLACE(eb.level_4, '%', '') AS DECIMAL) DESC,\n                        CAST(REPLACE(eb.level_3, '%', '') AS DECIMAL) DESC,\n                        CAST(REPLACE(eb.level_2, '%', '') AS DECIMAL) DESC,\n                        CAST(REPLACE(eb.level_1, '%', '') AS DECIMAL) DESC,\n                        eb.equipment_id DESC\n                ) boost_rank\nFROM\n    equipment_boosts eb\n    LEFT JOIN equipment e\n        ON e.equipment_id = eb.equipment_id\n)\nSELECT\n     boost_id\n    ,equipment_id\n    ,level_1\n    ,level_2\n    ,level_3\n    ,level_4\n    ,level_5\n    ,level_6\n    ,equipment_slot_id\n    ,equipment_type_id\nFROM\n    cte\nWHERE\n    boost_rank = 1"
   }
 }

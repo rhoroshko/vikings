@@ -7,6 +7,6 @@ pd.options.mode.chained_assignment = None
 
 vk = Vikings("")
 
-# print(vk.get_materials())
-print(vk.get_set("Скорость изучения Знаний"))
-
+print(vk.get_materials())
+print(vk.get_set_materials("Скорость изучения Знаний"))
+print(vk.get_set_summary("Скорость изучения Знаний"))
